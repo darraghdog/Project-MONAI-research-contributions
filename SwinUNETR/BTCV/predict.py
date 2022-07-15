@@ -1,9 +1,10 @@
 import os
 import glob
+import shutil
 import torch
 import argparse
-import imageio
 import cv2
+import mediapy
 import numpy as np
 from skimage import color, img_as_ubyte
 from monai import transforms, data
@@ -25,6 +26,8 @@ parser.add_argument('--roi_z', default=96, type=int, help='roi size in z directi
 parser.add_argument('--last_n_frames', default=64, type=int, help='Limit the frames inference. -1 for all frames.')
 args = parser.parse_args()
 
+ffmpeg_path = shutil.which('ffmpeg')
+mediapy.set_ffmpeg(ffmpeg_path)
 
 model = SwinUnetrModelForInference.from_pretrained('darragh/swinunetr-btcv-tiny')
 model.eval()
@@ -46,7 +49,7 @@ test_transform = transforms.Compose(
                                         b_min=args.b_min,
                                         b_max=args.b_max,
                                         clip=True),
-        #transforms.Resized(keys=["image"], spatial_size = (256,256,-1)), 
+        #transforms.Resized(keys=["image"], spatial_size = (256,256,-1)),
         transforms.ToTensord(keys=["image"]),
     ])
 
@@ -56,11 +59,11 @@ test_loader = data.DataLoader(test_ds,
                              shuffle=False)
 
 for i, batch in enumerate(test_loader):
-    
+
     tst_inputs = batch["image"]
     if args.last_n_frames>0:
         tst_inputs = tst_inputs[:,:,:,:,-args.last_n_frames:]
-    
+
     with torch.no_grad():
         outputs = model(tst_inputs,
                             (args.roi_x,
@@ -69,24 +72,19 @@ for i, batch in enumerate(test_loader):
                             8,
                             overlap=args.infer_overlap,
                             mode="gaussian")
-        
+
     tst_outputs = torch.softmax(outputs.logits, 1)
     tst_outputs = torch.argmax(tst_outputs, axis=1)
-    
+
     fnames = batch['image_meta_dict']['filename_or_obj']
-    
+
     # Write frames to video
+
     for fname, inp, outp in zip(fnames, tst_inputs, tst_outputs):
-        
+
         dicom_name = fname.split('/')[-1]
         video_name = f'videos/{dicom_name}.mp4'
-        
-        writer = imageio.get_writer(video_name,
-                                    fps = 4,
-                                    codec='mjpeg', 
-                                    quality=10, 
-                                    pixelformat='yuvj444p')
-    
+        frames = []
         for idx in range(inp.shape[-1]):
             # Segmentation
             seg = outp[:,:,idx].numpy().astype(np.uint8)
@@ -96,5 +94,5 @@ for i, batch in enumerate(test_loader):
             frame = color.label2rgb(seg,img, bg_label = 0)
             frame = img_as_ubyte(frame)
             frame = np.concatenate((img, frame), 1)
-            writer.append_data(frame)
-        writer.close()
+            frames.append(frame)
+        mediapy.write_video(video_name, frames, fps=4)
